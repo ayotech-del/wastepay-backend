@@ -1,8 +1,9 @@
-﻿from fastapi import FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers.auth import router as auth_router
 from app.routers.wallet import router as wallet_router
 from app.routers.billing import router as billing_router
+from app.routers.paystack import router as paystack_router
 from app.routers.contractors import router as contractors_router
 from app.routers.stubs import users_router, waste_router, bins_router, lga_router, webhooks_router, ussd_router
 
@@ -12,6 +13,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 app.include_router(auth_router,        prefix="/auth",        tags=["Auth"])
 app.include_router(wallet_router,      prefix="/wallet",      tags=["Wallet"])
+app.include_router(paystack_router, prefix="/paystack", tags=["Paystack"])
 app.include_router(billing_router,     prefix="/billing",     tags=["Billing"])
 app.include_router(contractors_router, prefix="/contractors", tags=["Contractors"])
 app.include_router(users_router,       prefix="/users",       tags=["Users"])
@@ -31,3 +33,4 @@ def health(): return {"status":"healthy"}
 def startup():
     from app.core.database import Base, engine
     Base.metadata.create_all(bind=engine)
+
