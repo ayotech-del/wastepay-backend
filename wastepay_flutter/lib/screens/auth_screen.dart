@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../services/api_service.dart';
-import 'home_screen.dart';
+import 'role_home_screen.dart';
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────────────────
 class LoginScreen extends StatefulWidget {
@@ -31,7 +31,7 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!mounted) return;
     if (result.success) {
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        MaterialPageRoute(builder: (_) => const RoleHomeScreen()),
       );
     } else {
       setState(() => _error = result.error);
@@ -161,7 +161,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     if (!mounted) return;
     if (result.success) {
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        MaterialPageRoute(builder: (_) => const RoleHomeScreen()),
         (_) => false,
       );
     } else {

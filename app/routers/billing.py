@@ -10,7 +10,7 @@ from app.core.core import get_db, settings
 from app.core.database import Base, engine
 from app.models.models import User, Wallet, Transaction, TransactionType, LGA
 
-from app.core.permissions import require_admin, check_lga
+from app.core.permissions import require_admin, require_finance, check_lga, allowed_lgas, audit
 from app.routers.auth import get_current_user
 router = APIRouter()
 
@@ -43,6 +43,7 @@ class Invoice(Base):
 
 class GenerateInvoiceRequest(BaseModel):
     lga_id: str; levy_type: LevyType = LevyType.RESIDENTIAL
+    contract_id: str | None = None
     model_config = ConfigDict(allow_inf_nan=False)
     amount: float = Field(gt=0, le=100000000); billing_period: str
     zone: Optional[str] = None; user_id: Optional[str] = None
@@ -62,28 +63,43 @@ def gen_invoice_number():
     return f"WP-INV-{datetime.utcnow().strftime('%Y%m')}-{uuid.uuid4().hex[:6].upper()}"
 
 def inv_out(inv):
-    return {"id":inv.id,"invoice_number":inv.invoice_number,"lga_id":inv.lga_id,
+    from sqlalchemy.orm import object_session
+    from app.models.access import ServiceInvoice,ServiceContract,Company
+    db=object_session(inv)
+    link=db.get(ServiceInvoice,inv.id) if db else None
+    contract=db.get(ServiceContract,link.contract_id) if link else None
+    company=db.get(Company,contract.company_id) if contract else None
+    return {"contractor_id":company.id if company else None,"contractor_name":company.name if company else None,"id":inv.id,"invoice_number":inv.invoice_number,"lga_id":inv.lga_id,
             "zone":inv.zone,"levy_type":inv.levy_type.value,"amount":inv.amount,
             "amount_paid":inv.amount_paid,"balance":round(inv.amount-inv.amount_paid,2),
             "status":inv.status.value,"billing_period":inv.billing_period,
             "due_date":str(inv.due_date),"description":inv.description,"created_at":str(inv.created_at)}
 
 @router.post("/invoice/generate", status_code=201)
-def generate_invoice(data: GenerateInvoiceRequest, grant=Depends(require_admin), db: Session = Depends(get_db)):
+def generate_invoice(data: GenerateInvoiceRequest, grant=Depends(require_finance), db: Session = Depends(get_db)):
     check_lga(grant, data.lga_id)
     lga = db.query(LGA).filter(LGA.id == data.lga_id).first()
     if not lga: raise HTTPException(404, f"LGA not found")
+    from app.models.access import ServiceContract,ServiceInvoice
+    contract=db.get(ServiceContract,data.contract_id) if data.contract_id else None
+    if data.contract_id:
+        if not contract or not contract.active or contract.lga_id!=data.lga_id:raise HTTPException(422,'Service contract must be active in this LGA')
+        if data.user_id and data.user_id!=contract.user_id:raise HTTPException(422,'Invoice consumer must match the service contract')
+    if data.user_id and not db.get(User,data.user_id):raise HTTPException(404,'Consumer not found')
     inv = Invoice(invoice_number=gen_invoice_number(), lga_id=data.lga_id,
-        user_id=data.user_id, zone=data.zone, levy_type=data.levy_type,
+        user_id=contract.user_id if contract else data.user_id, zone=data.zone, levy_type=data.levy_type,
         amount=data.amount, billing_period=data.billing_period,
         due_date=datetime.utcnow()+timedelta(days=data.due_days),
         description=data.description or f"{data.levy_type.value.title()} waste levy — {lga.name} — {data.billing_period}",
         status=InvoiceStatus.SENT)
-    db.add(inv); db.commit(); db.refresh(inv)
+    db.add(inv);db.flush()
+    if contract:db.add(ServiceInvoice(invoice_id=inv.id,contract_id=contract.id))
+    audit(db,grant.user_id,'invoice.created',inv.id,lga_id=inv.lga_id,company_id=contract.company_id if contract else None)
+    db.commit();db.refresh(inv)
     return {"status":"created","invoice":inv_out(inv)}
 
 @router.post("/invoice/bulk", status_code=201)
-def generate_bulk(data: BulkInvoiceRequest, grant=Depends(require_admin), db: Session = Depends(get_db)):
+def generate_bulk(data: BulkInvoiceRequest, grant=Depends(require_finance), db: Session = Depends(get_db)):
     check_lga(grant, data.lga_id)
     lga = db.query(LGA).filter(LGA.id == data.lga_id).first()
     if not lga: raise HTTPException(404, "LGA not found")
@@ -150,10 +166,9 @@ def billing_stats(lga_id: str, grant=Depends(require_admin), db: Session=Depends
             "overdue_count":sum(1 for i in invs if i.status==InvoiceStatus.OVERDUE)}
 
 @router.post("/overdue/mark")
-def mark_overdue(grant=Depends(require_admin), db: Session=Depends(get_db)):
-    if grant.role != "platform_admin": raise HTTPException(403,"Platform administrator required")
+def mark_overdue(grant=Depends(require_finance), db: Session=Depends(get_db)):
     now=datetime.utcnow()
-    invs=db.query(Invoice).filter(Invoice.status.in_([InvoiceStatus.SENT,InvoiceStatus.PARTIAL]),Invoice.due_date<now).all()
+    invs=db.query(Invoice).filter(Invoice.lga_id.in_(allowed_lgas(grant,db)),Invoice.status.in_([InvoiceStatus.SENT,InvoiceStatus.PARTIAL]),Invoice.due_date<now).all()
     for i in invs: i.status=InvoiceStatus.OVERDUE
     db.commit()
     return {"marked_overdue":len(invs)}

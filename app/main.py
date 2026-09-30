@@ -40,3 +40,8 @@ def startup():
     from app.core.database import Base, engine
     Base.metadata.create_all(bind=engine)
 
+
+from app.routers.access import router as access_router
+from app.routers.organizations import router as organizations_router
+app.include_router(access_router,prefix='/access',tags=['Role access'])
+app.include_router(organizations_router,prefix='/organizations',tags=['Companies and services'])

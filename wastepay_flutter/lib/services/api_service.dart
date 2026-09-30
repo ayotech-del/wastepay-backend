@@ -1,5 +1,6 @@
 // WastePay — Complete API Service wired to FastAPI backend
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/config.dart';
@@ -7,7 +8,10 @@ import '../models/models.dart';
 
 class ApiService {
   static const _storage = FlutterSecureStorage();
-  static final _client = http.Client();
+  static http.Client _client = http.Client();
+
+  @visibleForTesting
+  static void setHttpClientForTesting(http.Client client) => _client = client;
   static String get _base => AppConfig.baseUrl;
 
   static Future<Map<String, String>> _authHeaders() async {

@@ -16,3 +16,5 @@ coverage/
 .idea/
 *.iml
 .DS_Store
+
+ROLE_TEST_ACCOUNTS.md

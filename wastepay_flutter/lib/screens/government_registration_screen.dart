@@ -23,6 +23,10 @@ class _RegistrationState extends State<GovernmentRegistrationScreen> {
             'latitude': 'Latitude',
             'longitude': 'Longitude'
           },
+        'company' => {
+            'name': 'Company name',
+            'manager_user_id': 'Registered manager user ID'
+          },
         'contractor' => {
             'user_id': 'Registered driver user ID',
             'truck_number': 'Truck number',
@@ -32,7 +36,8 @@ class _RegistrationState extends State<GovernmentRegistrationScreen> {
       };
   String get _title => switch (widget.kind) {
         'bin' => 'Add smart bin',
-        'contractor' => 'Register contractor',
+        'company' => 'Approve contractor company',
+        'contractor' => 'Register legacy driver',
         _ => 'Add LGA',
       };
   @override
@@ -62,13 +67,20 @@ class _RegistrationState extends State<GovernmentRegistrationScreen> {
           if (entry.value.text.trim().isNotEmpty)
             entry.key: entry.value.text.trim()
       };
-      if (widget.lgaId != null) body['lga_id'] = widget.lgaId;
+      if (widget.lgaId != null) {
+        if (widget.kind == 'company') {
+          body['lga_ids'] = [widget.lgaId];
+        } else {
+          body['lga_id'] = widget.lgaId;
+        }
+      }
       if (widget.kind == 'bin') {
         body['latitude'] = double.parse(_fields['latitude']!.text);
         body['longitude'] = double.parse(_fields['longitude']!.text);
       }
       final path = switch (widget.kind) {
         'bin' => '/bins',
+        'company' => '/organizations/companies',
         'contractor' => '/contractors/register',
         _ => '/government/lgas',
       };
@@ -124,7 +136,8 @@ class _RegistrationState extends State<GovernmentRegistrationScreen> {
                               value.trim().length > 20) {
                             return 'Use at most 20 characters';
                           }
-                          if (entry.key == 'address' && value.trim().length < 5) {
+                          if (entry.key == 'address' &&
+                              value.trim().length < 5) {
                             return 'Enter a complete address';
                           }
                           return null;

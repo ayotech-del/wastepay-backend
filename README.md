@@ -48,3 +48,7 @@ flutter build web --dart-define=API_BASE_URL=http://localhost:8300
 Verified on September 30, 2026: 21 backend tests and 6 Flutter widget tests passed; Flutter analysis reported no issues; the standard JavaScript web build succeeded. Dependencies currently report WebAssembly incompatibilities, so this verification does not cover a Wasm build. API tests use isolated SQLite databases and mocked provider responses.
 
 See [UPDATE_GUIDE.md](UPDATE_GUIDE.md) for backend migration and integration limits, and [DEPLOY.md](DEPLOY.md) for deployment configuration. Flutter includes the web platform; mobile platform generation and device testing remain separate steps.
+
+## Scoped roles and contractor billing
+
+Government access is scoped by function and area. Company managers see their own fleet, routes and service invoices; drivers and consumers see their own work and bills. Customers select contractors by name/state, and managers complete receiving-bank setup before Paystack checkout is enabled. See [ACCESS_ROLES.md](ACCESS_ROLES.md) and [LOCAL_TESTING.md](LOCAL_TESTING.md). Real bank verification and checkout require Paystack configuration.

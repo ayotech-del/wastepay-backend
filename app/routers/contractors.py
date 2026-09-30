@@ -23,7 +23,7 @@ from app.core.core import get_db, settings
 from app.core.database import Base, engine
 from app.models.models import User, LGA, SmartBin, Transaction, TransactionType, Wallet
 from app.routers.auth import get_current_user
-from app.core.permissions import require_admin, check_lga
+from app.core.permissions import require_admin, require_operations, require_finance, check_lga, allowed_lgas, ensure_driver, audit, get_access, Access, ROLE_PERMISSIONS
 import httpx
 
 router = APIRouter()
@@ -142,8 +142,12 @@ class PaymentReleaseRequest(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/register", status_code=201)
-def register_contractor(data: RegisterContractorRequest, grant=Depends(require_admin), db: Session = Depends(get_db)):
+def register_contractor(data: RegisterContractorRequest, grant=Depends(require_operations), db: Session = Depends(get_db)):
     check_lga(grant, data.lga_id)
+    if data.rate_per_tonne!=8500 or data.bank_code or data.account_number:
+        current=get_access(db.get(User,grant.user_id),db)
+        financial=Access(grant.user_id,[g for g in current.grants if 'government.finance' in ROLE_PERMISSIONS.get(g.role,set())],db)
+        check_lga(financial,data.lga_id)
     """Register a new waste collection contractor."""
     if db.query(Contractor).filter(Contractor.user_id == data.user_id).first():
         raise HTTPException(400, "Contractor already registered for this user")
@@ -170,7 +174,7 @@ def register_contractor(data: RegisterContractorRequest, grant=Depends(require_a
 
 
 @router.post("/dispatch", status_code=201)
-def dispatch_contractor(data: DispatchRequest, grant=Depends(require_admin), db: Session = Depends(get_db)):
+def dispatch_contractor(data: DispatchRequest, grant=Depends(require_operations), db: Session = Depends(get_db)):
     check_lga(grant, data.lga_id)
     if not data.bin_ids or len(data.bin_ids) != len(set(data.bin_ids)):
         raise HTTPException(422, "Supply distinct bin IDs")
@@ -198,7 +202,17 @@ def dispatch_contractor(data: DispatchRequest, grant=Depends(require_admin), db:
         notes=data.notes,
         status=RouteStatus.ASSIGNED,
     )
-    db.add(route)
+    membership=ensure_driver(contractor,contractor.user_id,db)
+    db.add(route);db.flush()
+    if membership:
+        from app.models.access import Vehicle,RouteAssignment,CollectionJob
+        from app.routers.organizations import validate_area
+        validate_area(db,membership.company_id,data.lga_id)
+        vehicle=db.query(Vehicle).filter_by(driver_id=membership.id,active=True).one()
+        db.add(RouteAssignment(route_id=route.id,company_id=membership.company_id,vehicle_id=vehicle.id))
+        for bin_id in data.bin_ids:db.add(CollectionJob(route_id=route.id,company_id=membership.company_id,bin_id=bin_id))
+    audit(db,grant.user_id,'route.assigned',route.id,lga_id=route.lga_id,
+        company_id=membership.company_id if membership else None,details={'contractor_id':contractor.id})
     contractor.status = ContractorStatus.ON_ROUTE
     db.commit()
     db.refresh(route)
@@ -219,8 +233,7 @@ def update_location(data: LocationUpdateRequest, user=Depends(get_current_user),
     if not contractor:
         raise HTTPException(404, "Contractor not found")
 
-    if contractor.user_id != user.id:
-        raise HTTPException(403, "Not your contractor account")
+    ensure_driver(contractor,user.id,db)
     if data.status == ContractorStatus.SUSPENDED:
         raise HTTPException(403, "Invalid status transition")
     contractor.current_lat = data.lat
@@ -241,11 +254,10 @@ def update_location(data: LocationUpdateRequest, user=Depends(get_current_user),
 
 @router.get("/live")
 def live_contractors(lga_id: Optional[str] = None, grant=Depends(require_admin), db: Session = Depends(get_db)):
-    if grant.role != "platform_admin":
-        lga_id = grant.lga_id
-        if not lga_id: raise HTTPException(403, "No assigned LGA")
+    if lga_id:check_lga(grant,lga_id)
+    area_ids=allowed_lgas(grant,db)
     """Government dashboard: all active contractors with live positions."""
-    q = db.query(Contractor).filter(
+    q = db.query(Contractor).filter(Contractor.lga_id.in_(area_ids),
         Contractor.status.in_([ContractorStatus.ON_ROUTE, ContractorStatus.ACTIVE, ContractorStatus.BREAK])
     )
     if lga_id:
@@ -291,8 +303,11 @@ def live_contractors(lga_id: Optional[str] = None, grant=Depends(require_admin),
 @router.get("/my-routes")
 def my_routes(user=Depends(get_current_user), db: Session=Depends(get_db)):
     contractor = db.query(Contractor).filter_by(user_id=user.id).first()
-    if not contractor: raise HTTPException(403, "Contractor account required")
-    return [{"id":r.id, "status":r.status.value, "bin_ids":r.bin_ids.split(","), "total_kg":r.total_kg}
+    ensure_driver(contractor,user.id,db)
+    from app.models.access import CollectionJob
+    from app.routers.organizations import job_out
+    return [{"id":r.id, "status":r.status.value, "bin_ids":r.bin_ids.split(","), "total_kg":r.total_kg,
+             "jobs":[job_out(db,j,False) for j in db.query(CollectionJob).filter_by(route_id=r.id)]}
             for r in db.query(CollectionRoute).filter_by(contractor_id=contractor.id).all()]
 
 @router.post("/collection/verify")
@@ -302,11 +317,14 @@ def verify_collection(data: CollectionVerifyRequest, user=Depends(get_current_us
     route = db.query(CollectionRoute).filter_by(id=data.route_id).with_for_update().first()
     if not route: raise HTTPException(404, "Route not found")
     contractor = db.get(Contractor, route.contractor_id)
-    if contractor.user_id != user.id: raise HTTPException(403, "Not your route")
+    ensure_driver(contractor,user.id,db)
     if route.status not in (RouteStatus.ASSIGNED, RouteStatus.ACTIVE): raise HTTPException(409, "Route is closed")
     if data.bin_id not in route.bin_ids.split(","): raise HTTPException(400, "Bin not assigned")
     if db.query(CollectionEvent).filter_by(route_id=route.id, bin_id=data.bin_id).first():
         raise HTTPException(409, "Bin already collected on this route")
+    from app.models.access import CollectionJob
+    job=db.query(CollectionJob).filter_by(route_id=route.id,bin_id=data.bin_id).first()
+    if job and job.status in ('missed','cancelled'):raise HTTPException(409,'Dispatcher must reassign this missed or cancelled job')
     bin_ = db.get(SmartBin, data.bin_id)
     if data.qr_scan_data != bin_.bin_code: raise HTTPException(422, "QR must match bin code")
     if data.lat is None or data.lng is None or not (-90 <= data.lat <= 90 and -180 <= data.lng <= 180):
@@ -329,12 +347,20 @@ def verify_collection(data: CollectionVerifyRequest, user=Depends(get_current_us
     contractor.total_collected += kg
     db.flush()
     count = db.query(CollectionEvent).filter_by(route_id=route.id, verified=True).count()
+    if job:
+        from app.routers.operations import Pickup
+        job.status='collected_verified';job.verified_at=datetime.utcnow()
+        if job.pickup_id:db.get(Pickup,job.pickup_id).status='collected_verified'
+    if count==len(route.bin_ids.split(',')):
+        route.status=RouteStatus.COMPLETED;route.completed_at=datetime.utcnow()
+    audit(db,user.id,'collection.verified',job.id if job else event.id,lga_id=route.lga_id,
+        company_id=job.company_id if job else None,details={'weight_kg':kg,'route_id':route.id})
     db.commit()
     return {"status":"verified", "weight_kg":kg, "route_total_kg":route.total_kg,
             "bins_remaining":len(route.bin_ids.split(","))-count, "route_complete":count==len(route.bin_ids.split(","))}
 
 @router.post("/payment/release")
-def release_payment(data: PaymentReleaseRequest, grant=Depends(require_admin), db: Session=Depends(get_db)):
+def release_payment(data: PaymentReleaseRequest, grant=Depends(require_finance), db: Session=Depends(get_db)):
     route = db.query(CollectionRoute).filter_by(id=data.route_id).with_for_update().first()
     if not route: raise HTTPException(404, "Route not found")
     check_lga(grant, route.lga_id)
@@ -347,6 +373,10 @@ def release_payment(data: PaymentReleaseRequest, grant=Depends(require_admin), d
     route.payment_amount = round(sum(e.weight_kg for e in events)/1000*contractor.rate_per_tonne, 2)
     route.payment_status = "awaiting_disbursement"
     route.status = RouteStatus.COMPLETED; route.completed_at = datetime.utcnow()
+    from app.models.access import RouteAssignment
+    assignment=db.get(RouteAssignment,route.id)
+    audit(db,grant.user_id,'settlement.authorized',route.id,lga_id=route.lga_id,
+        company_id=assignment.company_id if assignment else None,details={'amount_ngn':route.payment_amount})
     db.commit()
     return {"status":"awaiting_disbursement", "route_id":route.id, "amount_ngn":route.payment_amount,
             "message":"Authorized only; no bank transfer has occurred"}
@@ -388,5 +418,5 @@ def contractor_report(lga_id: str, grant=Depends(require_admin), db: Session = D
 @router.get("/me")
 def my_contractor(user=Depends(get_current_user),db:Session=Depends(get_db)):
     c=db.query(Contractor).filter_by(user_id=user.id).first()
-    if not c: raise HTTPException(403,"Contractor account required")
+    ensure_driver(c,user.id,db)
     return {"id":c.id,"truck_number":c.truck_number,"status":c.status.value}

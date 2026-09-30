@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import 'government_registration_screen.dart';
+import 'profile_screen.dart';
+import 'company_dashboard_screen.dart';
+import 'role_access_screen.dart';
 
 class GovernmentScreen extends StatefulWidget {
   final bool registerContractor;
@@ -17,6 +20,12 @@ class _GovernmentScreenState extends State<GovernmentScreen> {
   bool _busy = true;
   bool _admin = false;
   bool _platformAdmin = false;
+  Map<String, dynamic>? _profile;
+  bool get _operations =>
+      ((_profile?['permission_lga_ids'] as Map?)?['government.operations']
+                  as List? ??
+              [])
+          .contains(_selected);
   @override
   void initState() {
     super.initState();
@@ -30,8 +39,9 @@ class _GovernmentScreenState extends State<GovernmentScreen> {
     });
     try {
       final profile = await ApiService.request('/users/me');
-      final platform = profile['role'] == 'platform_admin';
-      if (!platform && profile['role'] != 'lga_admin') {
+      final platform =
+          (profile['permissions'] as List).contains('access.manage');
+      if (!(profile['permissions'] as List).contains('government.view')) {
         throw ApiException(
             'This account has no government access. A system operator must assign your government role and LGA.');
       }
@@ -40,6 +50,7 @@ class _GovernmentScreenState extends State<GovernmentScreen> {
       final lgas = result['lgas'] as List;
       setState(() {
         _admin = true;
+        _profile = Map<String, dynamic>.from(profile);
         _platformAdmin = platform;
         _lgas = lgas;
         if (!lgas.any((l) => l['id'] == _selected)) {
@@ -89,6 +100,10 @@ class _GovernmentScreenState extends State<GovernmentScreen> {
                 : 'Government dashboard'),
             actions: [
               IconButton(
+                  onPressed: () => Navigator.push(context,
+                      MaterialPageRoute(builder: (_) => const ProfileScreen())),
+                  icon: const Icon(Icons.person)),
+              IconButton(
                   onPressed: _busy ? null : _initialize,
                   icon: const Icon(Icons.refresh))
             ]),
@@ -122,16 +137,35 @@ class _GovernmentScreenState extends State<GovernmentScreen> {
                 OutlinedButton(
                     onPressed: _busy ? null : () => _register('lga'),
                     child: const Text('Add LGA')),
-              FilledButton(
-                  onPressed: _busy || _selected == null
+              if (_operations)
+                FilledButton(
+                    onPressed: _busy || _selected == null
+                        ? null
+                        : () => _register('bin'),
+                    child: const Text('Add smart bin')),
+              if (_operations)
+                FilledButton(
+                    onPressed: _busy || _selected == null
+                        ? null
+                        : () => _register('company'),
+                    child: const Text('Approve contractor company')),
+              OutlinedButton(
+                  onPressed: _busy
                       ? null
-                      : () => _register('bin'),
-                  child: const Text('Add smart bin')),
-              FilledButton(
-                  onPressed: _busy || _selected == null
-                      ? null
-                      : () => _register('contractor'),
-                  child: const Text('Register contractor')),
+                      : () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const CompanyDashboardScreen())),
+                  child: const Text('Companies, tracking & payments')),
+              if (_platformAdmin)
+                OutlinedButton(
+                    onPressed: _busy
+                        ? null
+                        : () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const RoleAccessScreen())),
+                    child: const Text('Manage user roles')),
             ]),
           ],
           if (_data != null) ...[

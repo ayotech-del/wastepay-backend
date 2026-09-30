@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'core/theme.dart';
 import 'screens/auth_screen.dart';
-import 'screens/home_screen.dart';
+import 'screens/role_home_screen.dart';
 import 'services/api_service.dart';
 
 void main() async {
@@ -42,7 +42,7 @@ class _SplashScreenState extends State<SplashScreen> {
     final loggedIn = await ApiService.isLoggedIn();
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => loggedIn ? const HomeScreen() : const LoginScreen()),
+      MaterialPageRoute(builder: (_) => loggedIn ? const RoleHomeScreen() : const LoginScreen()),
     );
   }
 

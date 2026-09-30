@@ -26,6 +26,8 @@ class InitPayRequest(BaseModel):
     purpose:str='wallet_topup'
     email:str|None=None
     invoice_id:str|None=None
+    company_id:str|None=None
+    channel:str|None=None
 def kobo(amount): return int((Decimal(str(amount))*100).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
 def provider(path,payload=None):
     if not settings.PAYSTACK_SECRET_KEY: raise HTTPException(503,'Paystack is not configured')
@@ -46,6 +48,25 @@ def initialize(data:InitPayRequest,user=Depends(get_current_user),db:Session=Dep
         if inv.status in (InvoiceStatus.PAID,InvoiceStatus.CANCELLED) or kobo(data.amount)>kobo(inv.amount-inv.amount_paid):
             raise HTTPException(422,'Invoice amount is invalid')
     elif data.invoice_id: raise HTTPException(422,'Invoice not allowed for wallet topup')
+    if data.purpose=='levy_payment' and not data.company_id:
+        from app.models.access import ServiceInvoice
+        if db.get(ServiceInvoice,inv.id):raise HTTPException(422,'Select the invoice contractor before checkout')
+    payload_extra={}
+    if data.company_id:
+        from app.models.access import Company,CompanyBank,ServiceInvoice,ServiceContract,CustomerContractor
+        if data.purpose!='levy_payment':raise HTTPException(422,'Contractor checkout requires an invoice')
+        link=db.get(ServiceInvoice,inv.id)
+        contract=db.get(ServiceContract,link.contract_id) if link else None
+        selected=db.get(CustomerContractor,user.id)
+        company=db.get(Company,data.company_id)
+        if not company or not company.active or not contract or contract.company_id!=company.id or not selected or selected.company_id!=company.id:
+            raise HTTPException(403,'Invoice must belong to your selected contractor')
+        bank=db.get(CompanyBank,company.id)
+        if not bank or not bank.verified or not bank.subaccount_code:raise HTTPException(409,'Contractor must complete receiving bank setup before payment')
+        if data.channel not in ('card','bank_transfer'):raise HTTPException(422,'Choose debit card or bank transfer')
+        payload_extra={'subaccount':bank.subaccount_code,'bearer':'subaccount','channels':[data.channel],
+            'metadata':{'contractor_id':company.id,'invoice_id':inv.id}}
+    elif data.channel:raise HTTPException(422,'Contractor selection is required')
     email=data.email or user.email
     if not email: raise HTTPException(422,'Email is required for checkout')
     ref='WP-'+uuid.uuid4().hex.upper()
@@ -54,7 +75,7 @@ def initialize(data:InitPayRequest,user=Depends(get_current_user),db:Session=Dep
     db.add(Transaction(user_id=user.id,type=TransactionType.LEVY_PAYMENT,amount=intent.amount_kobo/100,
         reference=ref,paystack_ref=ref,status='pending',description='Paystack '+data.purpose))
     db.commit() # Persist before provider can send a callback.
-    result=provider('/transaction/initialize',{'email':email,'amount':intent.amount_kobo,'reference':ref,'currency':'NGN'})
+    result=provider('/transaction/initialize',{'email':email,'amount':intent.amount_kobo,'reference':ref,'currency':'NGN',**payload_extra})
     return {'status':'initialized','reference':ref,'payment_url':result['authorization_url'],'amount_ngn':intent.amount_kobo/100}
 def settle(data,db):
     from app.routers.billing import Invoice,InvoiceStatus

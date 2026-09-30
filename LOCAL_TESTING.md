@@ -1,3 +1,13 @@
+# Role testing on Flutter web
+
+Open http://localhost:3000 with the API on http://localhost:8300. Sign in again after the backend restart.
+
+Generated local test credentials are in ROLE_TEST_ACCOUNTS.md. Use the platform administrator to review government and role management, either company manager to review its drivers/routes/consumer invoices, and consumer or driver accounts to review their restricted dashboards. The two demo companies share an LGA so company isolation is visible.
+
+These accounts were added without changing existing users or passwords. A database backup is at wastepay_dev.before_roles.db. Demo credits are local test data. Bin IDs WP-DEMO-A and WP-DEMO-B can be looked up; they have no physical sensor installation.
+
+See ACCESS_ROLES.md for access rules and onboarding. Real pickup verification still requires the existing sensor and distance evidence. Government finance can authorize settlement; actual bank disbursement remains a separate integration.
+
 # Local government, contractor and bin testing
 
 Open http://localhost:3000 with the backend running on port 8300.
@@ -9,7 +19,8 @@ Create a normal account using Register. A system operator must then provision it
 From the workspace root, replace YOUR_REGISTERED_PHONE with the canonical +234 phone number:
 
 ```powershell
-./.venv/Scripts/python.exe scripts/manage_staff.py --phone YOUR_REGISTERED_PHONE --role platform_admin
+Set-Location the repository root
+../../.venv/Scripts/python.exe scripts/manage_staff.py --phone YOUR_REGISTERED_PHONE --role platform_admin
 ```
 
 For LGA-only access, use `--role lga_admin --lga-id YOUR_LGA_ID` after that LGA exists. No server restart is required for role changes.

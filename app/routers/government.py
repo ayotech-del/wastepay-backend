@@ -3,7 +3,7 @@ from fastapi import APIRouter,Depends,HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.core.permissions import require_admin,check_lga
+from app.core.permissions import require_admin,check_lga,allowed_lgas,require_platform,audit
 from app.models.models import LGA,SmartBin,Transaction,User
 from app.routers.billing import billing_stats
 from app.routers.contractors import contractor_report,live_contractors
@@ -11,7 +11,7 @@ router=APIRouter()
 @router.get('/my-lgas')
 def my_lgas(grant=Depends(require_admin),db:Session=Depends(get_db)):
     q=db.query(LGA)
-    if grant.role!='platform_admin':q=q.filter_by(id=grant.lga_id)
+    q=q.filter(LGA.id.in_(allowed_lgas(grant,db)))
     return {'lgas':[{'id':l.id,'name':l.name,'state':l.state} for l in q.order_by(LGA.name).all()]}
 
 from pydantic import BaseModel,Field,ConfigDict
@@ -21,10 +21,10 @@ class LGAInput(BaseModel):
     name:str=Field(min_length=2,max_length=200)
     state:str=Field(min_length=2,max_length=100)
 @router.post('/lgas',status_code=201)
-def create_lga(data:LGAInput,grant=Depends(require_admin),db:Session=Depends(get_db)):
-    if grant.role!='platform_admin':raise HTTPException(403,'Platform administrator access required')
+def create_lga(data:LGAInput,grant=Depends(require_platform),db:Session=Depends(get_db)):
     lga=LGA(**data.model_dump());db.add(lga)
-    try:db.commit()
+    try:
+        db.flush();audit(db,grant.user_id,'lga.created',lga.id,lga_id=lga.id);db.commit()
     except IntegrityError:
         db.rollback();raise HTTPException(409,'LGA already registered')
     db.refresh(lga)

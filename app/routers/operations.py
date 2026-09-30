@@ -1,13 +1,13 @@
 """Persistent citizen operations and trusted HTTP telemetry ingestion."""
 import math, hmac
-from datetime import datetime
+from datetime import datetime,timedelta
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import Session
 from app.core.database import Base, get_db
 from app.core.core import settings
-from app.core.permissions import StaffGrant, require_admin, check_lga
+from app.core.permissions import StaffGrant, require_admin, require_operations, get_access, describe_access, check_lga, audit
 from app.models.models import User, LGA, SmartBin, BinStatus, WasteDeposit, WasteType, gen_id
 from sqlalchemy.exc import IntegrityError
 from app.routers.auth import get_current_user
@@ -39,6 +39,7 @@ class Deposit(Input):
     bin_id: str
     qr_scan_data: str | None=None
 class PickupInput(Input):
+    contract_id: str | None=None
     address: str=Field(min_length=5,max_length=500)
     notes: str=Field(default='',max_length=1000)
 
@@ -55,7 +56,7 @@ def bin_details(b):
             'address':b.address,'lga_id':b.lga_id,'fill_percent':b.fill_percent,'status':b.status.value}
 
 @bins_router.post('',status_code=201)
-def create_bin(data:BinInput,grant=Depends(require_admin),db:Session=Depends(get_db)):
+def create_bin(data:BinInput,grant=Depends(require_operations),db:Session=Depends(get_db)):
     check_lga(grant,data.lga_id)
     if not db.get(LGA,data.lga_id): raise HTTPException(404,'LGA not found')
     if db.query(SmartBin).filter_by(bin_code=data.bin_code).first():
@@ -84,11 +85,11 @@ def distance_m(lat,lng,lat2,lng2):
     x=math.sin(dlat/2)**2+math.cos(a)*math.cos(b)*math.sin(dlng/2)**2
     return 6371000*2*math.asin(math.sqrt(min(1,x)))
 @users_router.get('/me')
-def me(user=Depends(get_current_user),db:Session=Depends(get_db)):
+def me(user=Depends(get_current_user),access=Depends(get_access),db:Session=Depends(get_db)):
     grant=db.get(StaffGrant,user.id)
     return {'id':user.id,'phone':user.phone,'email':user.email,'full_name':user.full_name,
             'kyc_tier':user.kyc_tier.value,'lga_id':user.lga_id,
-            'role':grant.role if grant else ('contractor' if user.is_collector else 'citizen')}
+            **describe_access(access,user)}
 @users_router.post('/kyc/nin')
 @users_router.post('/kyc/bvn')
 def unavailable_kyc(user=Depends(get_current_user)):
@@ -108,11 +109,14 @@ def nearby(lat:float=0,lng:float=0,radius_km:float=3,db:Session=Depends(get_db))
 def telemetry(data:Telemetry,x_telemetry_key:str=Header(default=''),db:Session=Depends(get_db)):
     if not settings.TELEMETRY_KEY: raise HTTPException(503,'Telemetry bridge not configured')
     if not hmac.compare_digest(x_telemetry_key,settings.TELEMETRY_KEY): raise HTTPException(401,'Invalid telemetry credential')
-    b=db.query(SmartBin).filter_by(bin_code=data.bin_code).first()
+    b=db.query(SmartBin).filter_by(bin_code=data.bin_code).with_for_update().first()
     if not b: raise HTTPException(404,'Bin not found')
-    b.fill_percent=data.fill_percent; b.last_telemetry=datetime.utcnow()
+    received=datetime.utcnow()
+    latest=db.query(BinReading).filter_by(bin_id=b.id).order_by(BinReading.recorded_at.desc()).first()
+    if latest and received<=latest.recorded_at:received=latest.recorded_at+timedelta(microseconds=1)
+    b.fill_percent=data.fill_percent; b.last_telemetry=received
     b.status=BinStatus.FULL if data.fill_percent>=75 else BinStatus.ACTIVE
-    r=BinReading(bin_id=b.id,weight_kg=data.weight_kg);db.add(r);db.commit()
+    r=BinReading(bin_id=b.id,weight_kg=data.weight_kg,recorded_at=received);db.add(r);db.commit()
     return {'status':'recorded','reading_id':r.id,'collection_alert':data.fill_percent>=75}
 @bins_router.get('/{bin_code}/status')
 def bin_status(bin_code:str,db:Session=Depends(get_db)):
@@ -136,7 +140,12 @@ def history(user=Depends(get_current_user),db:Session=Depends(get_db)):
             for d in db.query(WasteDeposit).filter_by(user_id=user.id).order_by(WasteDeposit.created_at.desc()).limit(100)]
 @pickups_router.post('',status_code=201)
 def pickup(data:PickupInput,user=Depends(get_current_user),db:Session=Depends(get_db)):
-    p=Pickup(user_id=user.id,**data.model_dump());db.add(p);db.commit()
+    from app.models.access import ServiceContract,PickupContract
+    contract=db.get(ServiceContract,data.contract_id) if data.contract_id else None
+    if data.contract_id and (not contract or not contract.active or contract.user_id!=user.id):raise HTTPException(403,'Service contract does not belong to you')
+    p=Pickup(user_id=user.id,**data.model_dump(exclude={'contract_id'}));db.add(p);db.flush()
+    if contract:db.add(PickupContract(pickup_id=p.id,contract_id=contract.id))
+    db.commit()
     return {'id':p.id,'status':p.status}
 @pickups_router.get('')
 def pickups(user=Depends(get_current_user),db:Session=Depends(get_db)):
@@ -144,7 +153,7 @@ def pickups(user=Depends(get_current_user),db:Session=Depends(get_db)):
             for p in db.query(Pickup).filter_by(user_id=user.id).order_by(Pickup.created_at.desc()).limit(100)]
 
 @waste_router.post('/deposit/{deposit_id}/verify')
-def verify_deposit(deposit_id:str,grant=Depends(require_admin),db:Session=Depends(get_db)):
+def verify_deposit(deposit_id:str,grant=Depends(require_operations),db:Session=Depends(get_db)):
     from sqlalchemy import update
     from app.models.models import Wallet,Transaction,TransactionType
     d=db.query(WasteDeposit).filter_by(id=deposit_id).with_for_update().first()
@@ -170,5 +179,6 @@ def verify_deposit(deposit_id:str,grant=Depends(require_admin),db:Session=Depend
     d.verified=True;d.credit_value=credit;d.weight_kg=kg;d.notes=f'Verified by {grant.user_id}; reading {after.id}'
     db.add(Transaction(user_id=d.user_id,type=TransactionType.CREDIT_EARNED,amount=credit,
         reference='DEPOSIT-'+d.id,status='success',description=f'{kg}kg {d.waste_type.value} verified'))
+    audit(db,grant.user_id,'deposit.verified',d.id,lga_id=b.lga_id,details={'credit_value':credit,'weight_kg':kg})
     db.commit()
     return {'status':'verified','credit_value':credit,'weight_kg':kg}
