@@ -1,9 +1,12 @@
-import os
+import os, secrets
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    ENVIRONMENT: str = "development"
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8300"
+    TELEMETRY_KEY: str = ""
     DATABASE_URL: str = "sqlite:///./wastepay_dev.db"
-    SECRET_KEY: str = "dev-secret-key-change-in-production"
+    SECRET_KEY: str = ""
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -26,6 +29,10 @@ class Settings(BaseSettings):
         env_file = ".env"
 
 settings = Settings()
+if settings.ENVIRONMENT == "production" and (len(settings.SECRET_KEY) < 32 or settings.SECRET_KEY.startswith("dev-")):
+    raise RuntimeError("Production requires a random SECRET_KEY of at least 32 characters")
+if not settings.SECRET_KEY:
+    settings.SECRET_KEY = secrets.token_urlsafe(48) # Development only; configure a persistent key for deployment.
 
 from app.core.database import SessionLocal, Base, get_db
 

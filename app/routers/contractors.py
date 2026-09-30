@@ -12,9 +12,9 @@ GET  /contractors/report/{lga_id}   → Contractor performance report
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import Column, String, Float, Integer, Boolean, DateTime, Enum, ForeignKey, Text
+from sqlalchemy import UniqueConstraint, Column, String, Float, Integer, Boolean, DateTime, Enum, ForeignKey, Text
 from sqlalchemy.sql import func
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 import uuid, enum
 from datetime import datetime
@@ -23,6 +23,7 @@ from app.core.core import get_db, settings
 from app.core.database import Base, engine
 from app.models.models import User, LGA, SmartBin, Transaction, TransactionType, Wallet
 from app.routers.auth import get_current_user
+from app.core.permissions import require_admin, check_lga
 import httpx
 
 router = APIRouter()
@@ -78,6 +79,7 @@ class CollectionRoute(Base):
 
 class CollectionEvent(Base):
     __tablename__ = "collection_events"
+    __table_args__ = (UniqueConstraint("route_id", "bin_id", name="uq_route_bin"),)
     id              = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     route_id        = Column(String, ForeignKey("collection_routes.id"), nullable=False)
     contractor_id   = Column(String, ForeignKey("contractors.id"), nullable=False)
@@ -98,7 +100,7 @@ class LocationPing(Base):
     speed_kmh       = Column(Float, nullable=True)
     recorded_at     = Column(DateTime(timezone=True), server_default=func.now())
 
-Base.metadata.create_all(bind=engine)
+
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -107,8 +109,8 @@ class RegisterContractorRequest(BaseModel):
     lga_id:           str
     truck_number:     str
     license_plate:    Optional[str] = None
-    capacity_tonnes:  float = 5.0
-    rate_per_tonne:   float = 8500.0
+    capacity_tonnes:  float = Field(default=5.0, gt=0, le=100)
+    rate_per_tonne:   float = Field(default=8500.0, gt=0, le=10000000)
     bank_code:        Optional[str] = None
     account_number:   Optional[str] = None
 
@@ -120,8 +122,8 @@ class DispatchRequest(BaseModel):
 
 class LocationUpdateRequest(BaseModel):
     contractor_id:  str
-    lat:            float
-    lng:            float
+    lat:            float = Field(ge=-90, le=90)
+    lng:            float = Field(ge=-180, le=180)
     speed_kmh:      Optional[float] = None
     status:         Optional[ContractorStatus] = None
 
@@ -140,7 +142,8 @@ class PaymentReleaseRequest(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/register", status_code=201)
-def register_contractor(data: RegisterContractorRequest, db: Session = Depends(get_db)):
+def register_contractor(data: RegisterContractorRequest, grant=Depends(require_admin), db: Session = Depends(get_db)):
+    check_lga(grant, data.lga_id)
     """Register a new waste collection contractor."""
     if db.query(Contractor).filter(Contractor.user_id == data.user_id).first():
         raise HTTPException(400, "Contractor already registered for this user")
@@ -157,6 +160,9 @@ def register_contractor(data: RegisterContractorRequest, db: Session = Depends(g
         bank_code=data.bank_code,
         account_number=data.account_number,
     )
+    user = db.get(User, data.user_id)
+    if not user or not db.get(LGA, data.lga_id): raise HTTPException(404,"User or LGA not found")
+    user.is_collector = True
     db.add(contractor)
     db.commit()
     db.refresh(contractor)
@@ -164,7 +170,10 @@ def register_contractor(data: RegisterContractorRequest, db: Session = Depends(g
 
 
 @router.post("/dispatch", status_code=201)
-def dispatch_contractor(data: DispatchRequest, db: Session = Depends(get_db)):
+def dispatch_contractor(data: DispatchRequest, grant=Depends(require_admin), db: Session = Depends(get_db)):
+    check_lga(grant, data.lga_id)
+    if not data.bin_ids or len(data.bin_ids) != len(set(data.bin_ids)):
+        raise HTTPException(422, "Supply distinct bin IDs")
     """Assign contractor to a collection route."""
     contractor = db.query(Contractor).filter(Contractor.id == data.contractor_id).first()
     if not contractor:
@@ -172,12 +181,16 @@ def dispatch_contractor(data: DispatchRequest, db: Session = Depends(get_db)):
     if contractor.status == ContractorStatus.SUSPENDED:
         raise HTTPException(403, "Contractor is suspended")
 
+    if contractor.lga_id != data.lga_id:
+        raise HTTPException(400, "Contractor LGA mismatch")
     # Validate bins exist
     from app.models.models import SmartBin
     bins = db.query(SmartBin).filter(SmartBin.id.in_(data.bin_ids)).all()
     if len(bins) != len(data.bin_ids):
         raise HTTPException(404, "One or more bin IDs not found")
 
+    if any(b.lga_id != data.lga_id for b in bins):
+        raise HTTPException(400, "Bin LGA mismatch")
     route = CollectionRoute(
         contractor_id=data.contractor_id,
         lga_id=data.lga_id,
@@ -200,12 +213,16 @@ def dispatch_contractor(data: DispatchRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/location/update")
-def update_location(data: LocationUpdateRequest, db: Session = Depends(get_db)):
+def update_location(data: LocationUpdateRequest, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """GPS ping from contractor's mobile device."""
     contractor = db.query(Contractor).filter(Contractor.id == data.contractor_id).first()
     if not contractor:
         raise HTTPException(404, "Contractor not found")
 
+    if contractor.user_id != user.id:
+        raise HTTPException(403, "Not your contractor account")
+    if data.status == ContractorStatus.SUSPENDED:
+        raise HTTPException(403, "Invalid status transition")
     contractor.current_lat = data.lat
     contractor.current_lng = data.lng
     contractor.last_ping   = datetime.utcnow()
@@ -223,7 +240,10 @@ def update_location(data: LocationUpdateRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/live")
-def live_contractors(lga_id: Optional[str] = None, db: Session = Depends(get_db)):
+def live_contractors(lga_id: Optional[str] = None, grant=Depends(require_admin), db: Session = Depends(get_db)):
+    if grant.role != "platform_admin":
+        lga_id = grant.lga_id
+        if not lga_id: raise HTTPException(403, "No assigned LGA")
     """Government dashboard: all active contractors with live positions."""
     q = db.query(Contractor).filter(
         Contractor.status.in_([ContractorStatus.ON_ROUTE, ContractorStatus.ACTIVE, ContractorStatus.BREAK])
@@ -268,148 +288,72 @@ def live_contractors(lga_id: Optional[str] = None, db: Session = Depends(get_db)
     return {"active_contractors": len(result), "contractors": result}
 
 
+@router.get("/my-routes")
+def my_routes(user=Depends(get_current_user), db: Session=Depends(get_db)):
+    contractor = db.query(Contractor).filter_by(user_id=user.id).first()
+    if not contractor: raise HTTPException(403, "Contractor account required")
+    return [{"id":r.id, "status":r.status.value, "bin_ids":r.bin_ids.split(","), "total_kg":r.total_kg}
+            for r in db.query(CollectionRoute).filter_by(contractor_id=contractor.id).all()]
+
 @router.post("/collection/verify")
-def verify_collection(data: CollectionVerifyRequest, db: Session = Depends(get_db)):
-    """Record and verify a bin collection event (QR scan + weight)."""
-    route = db.query(CollectionRoute).filter(CollectionRoute.id == data.route_id).first()
-    if not route:
-        raise HTTPException(404, "Route not found")
-
-    # Verify bin is on this route
-    if data.bin_id not in route.bin_ids.split(","):
-        raise HTTPException(400, f"Bin {data.bin_id} is not on route {data.route_id}")
-
-    event = CollectionEvent(
-        route_id=data.route_id,
-        contractor_id=route.contractor_id,
-        bin_id=data.bin_id,
-        weight_kg=data.weight_kg,
-        qr_scan_data=data.qr_scan_data,
-        verified=bool(data.qr_scan_data),
-        lat=data.lat,
-        lng=data.lng,
-    )
+def verify_collection(data: CollectionVerifyRequest, user=Depends(get_current_user), db: Session=Depends(get_db)):
+    from app.routers.operations import BinReading, distance_m
+    from sqlalchemy import update
+    route = db.query(CollectionRoute).filter_by(id=data.route_id).with_for_update().first()
+    if not route: raise HTTPException(404, "Route not found")
+    contractor = db.get(Contractor, route.contractor_id)
+    if contractor.user_id != user.id: raise HTTPException(403, "Not your route")
+    if route.status not in (RouteStatus.ASSIGNED, RouteStatus.ACTIVE): raise HTTPException(409, "Route is closed")
+    if data.bin_id not in route.bin_ids.split(","): raise HTTPException(400, "Bin not assigned")
+    if db.query(CollectionEvent).filter_by(route_id=route.id, bin_id=data.bin_id).first():
+        raise HTTPException(409, "Bin already collected on this route")
+    bin_ = db.get(SmartBin, data.bin_id)
+    if data.qr_scan_data != bin_.bin_code: raise HTTPException(422, "QR must match bin code")
+    if data.lat is None or data.lng is None or not (-90 <= data.lat <= 90 and -180 <= data.lng <= 180):
+        raise HTTPException(422, "Valid GPS position required")
+    if distance_m(data.lat, data.lng, bin_.latitude, bin_.longitude) > 100:
+        raise HTTPException(422, "Outside 100 metre collection radius")
+    readings = db.query(BinReading).filter_by(bin_id=bin_.id).order_by(BinReading.recorded_at.desc()).limit(2).all()
+    if len(readings) != 2: raise HTTPException(422, "Two trusted sensor readings required")
+    after, before = readings
+    if (datetime.utcnow() - after.recorded_at.replace(tzinfo=None)).total_seconds() > 300 or (after.recorded_at-before.recorded_at).total_seconds() > 600:
+        raise HTTPException(422, "Sensor readings are stale")
+    kg = round(before.weight_kg - after.weight_kg, 3)
+    if kg <= 0: raise HTTPException(422, "Sensor has not confirmed weight removal")
+    claimed = db.execute(update(BinReading).where(BinReading.id==after.id, BinReading.used==False).values(used=True))
+    if claimed.rowcount != 1: raise HTTPException(409, "Sensor reading already used")
+    event = CollectionEvent(route_id=route.id, contractor_id=contractor.id, bin_id=bin_.id,
+        weight_kg=kg, qr_scan_data=data.qr_scan_data, verified=True, lat=data.lat, lng=data.lng)
     db.add(event)
-
-    # Update route totals
-    route.total_kg += data.weight_kg
-    route.status = RouteStatus.ACTIVE
-
-    # Update smart bin fill level
-    bin_ = db.query(SmartBin).filter(SmartBin.id == data.bin_id).first()
-    if bin_:
-        from app.models.models import BinStatus
-        bin_.fill_percent = 0
-        bin_.status = BinStatus.ACTIVE
-        bin_.last_emptied = datetime.utcnow()
-
-    # Update contractor totals
-    contractor = db.query(Contractor).filter(Contractor.id == route.contractor_id).first()
-    if contractor:
-        contractor.total_collected += data.weight_kg
-
+    route.total_kg += kg; route.status = RouteStatus.ACTIVE
+    contractor.total_collected += kg
+    db.flush()
+    count = db.query(CollectionEvent).filter_by(route_id=route.id, verified=True).count()
     db.commit()
-
-    # Check if all bins done
-    all_bins   = route.bin_ids.split(",")
-    done_bins  = [e.bin_id for e in db.query(CollectionEvent).filter(
-        CollectionEvent.route_id == data.route_id).all()]
-    remaining  = [b for b in all_bins if b not in done_bins]
-
-    return {
-        "status": "verified",
-        "bin_id": data.bin_id,
-        "weight_kg": data.weight_kg,
-        "route_total_kg": round(route.total_kg, 2),
-        "bins_remaining": len(remaining),
-        "route_complete": len(remaining) == 0,
-    }
-
+    return {"status":"verified", "weight_kg":kg, "route_total_kg":route.total_kg,
+            "bins_remaining":len(route.bin_ids.split(","))-count, "route_complete":count==len(route.bin_ids.split(","))}
 
 @router.post("/payment/release")
-def release_payment(data: PaymentReleaseRequest, db: Session = Depends(get_db)):
-    """Release contractor payment after verified collection. Auto-calculates from weight."""
-    route = db.query(CollectionRoute).filter(CollectionRoute.id == data.route_id).first()
-    if not route:
-        raise HTTPException(404, "Route not found")
-    if route.payment_status == "released":
-        raise HTTPException(400, "Payment already released for this route")
-
-    contractor = db.query(Contractor).filter(Contractor.id == route.contractor_id).first()
-    if not contractor:
-        raise HTTPException(404, "Contractor not found")
-
-    # Calculate payment: weight × rate per tonne
-    tonnes  = route.total_kg / 1000
-    amount  = data.override_amount or round(tonnes * contractor.rate_per_tonne, 2)
-
-    if amount <= 0:
-        raise HTTPException(400, "No verified collection weight — cannot release payment")
-
-    ref = f"WP-CPAY-{uuid.uuid4().hex[:12].upper()}"
-
-    # Paystack transfer to contractor's bank
-    if contractor.bank_code and contractor.account_number:
-        try:
-            # Create transfer recipient
-            rec_resp = httpx.post(
-                f"{settings.PAYSTACK_BASE_URL}/transferrecipient",
-                headers={
-                    "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "type": "nuban",
-                    "name": db.query(User).filter(User.id == contractor.user_id).first().full_name,
-                    "account_number": contractor.account_number,
-                    "bank_code": contractor.bank_code,
-                    "currency": "NGN",
-                },
-                timeout=30
-            )
-            rec_code = rec_resp.json().get("data", {}).get("recipient_code")
-
-            if rec_code:
-                httpx.post(
-                    f"{settings.PAYSTACK_BASE_URL}/transfer",
-                    headers={
-                        "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "source": "balance",
-                        "amount": int(amount * 100),
-                        "recipient": rec_code,
-                        "reference": ref,
-                        "reason": f"WastePay collection — {route.id[:8]} — {tonnes:.2f}t",
-                    },
-                    timeout=30
-                )
-        except Exception:
-            pass  # Log but don't fail — mark as pending bank release
-
-    route.payment_amount  = amount
-    route.payment_status  = "released"
-    route.completed_at    = datetime.utcnow()
-    route.status          = RouteStatus.COMPLETED
-    contractor.total_earned += amount
-    contractor.status     = ContractorStatus.ACTIVE
-
+def release_payment(data: PaymentReleaseRequest, grant=Depends(require_admin), db: Session=Depends(get_db)):
+    route = db.query(CollectionRoute).filter_by(id=data.route_id).with_for_update().first()
+    if not route: raise HTTPException(404, "Route not found")
+    check_lga(grant, route.lga_id)
+    events = db.query(CollectionEvent).filter_by(route_id=route.id, verified=True).all()
+    if set(e.bin_id for e in events) != set(route.bin_ids.split(",")):
+        raise HTTPException(409, "All assigned bins require verified collections")
+    if data.override_amount is not None: raise HTTPException(422, "Amount is calculated from verified weight")
+    if route.payment_status != "pending": raise HTTPException(409, "Payment already authorized")
+    contractor = db.get(Contractor, route.contractor_id)
+    route.payment_amount = round(sum(e.weight_kg for e in events)/1000*contractor.rate_per_tonne, 2)
+    route.payment_status = "awaiting_disbursement"
+    route.status = RouteStatus.COMPLETED; route.completed_at = datetime.utcnow()
     db.commit()
-
-    return {
-        "status":          "released",
-        "route_id":        data.route_id,
-        "contractor":      contractor.truck_number,
-        "tonnes_collected": round(tonnes, 3),
-        "amount_released":  amount,
-        "reference":        ref,
-        "rate_per_tonne":   contractor.rate_per_tonne,
-    }
-
+    return {"status":"awaiting_disbursement", "route_id":route.id, "amount_ngn":route.payment_amount,
+            "message":"Authorized only; no bank transfer has occurred"}
 
 @router.get("/report/{lga_id}")
-def contractor_report(lga_id: str, db: Session = Depends(get_db)):
+def contractor_report(lga_id: str, grant=Depends(require_admin), db: Session = Depends(get_db)):
+    check_lga(grant, lga_id)
     """Contractor performance report for government dashboard."""
     contractors = db.query(Contractor).filter(Contractor.lga_id == lga_id).all()
     report = []
@@ -440,3 +384,9 @@ def contractor_report(lga_id: str, db: Session = Depends(get_db)):
         "total_paid_ngn":    round(sum(c.total_earned for c in contractors), 2),
         "contractors":       report,
     }
+
+@router.get("/me")
+def my_contractor(user=Depends(get_current_user),db:Session=Depends(get_db)):
+    c=db.query(Contractor).filter_by(user_id=user.id).first()
+    if not c: raise HTTPException(403,"Contractor account required")
+    return {"id":c.id,"truck_number":c.truck_number,"status":c.status.value}

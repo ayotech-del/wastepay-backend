@@ -5,11 +5,13 @@ from app.routers.wallet import router as wallet_router
 from app.routers.billing import router as billing_router
 from app.routers.paystack import router as paystack_router
 from app.routers.contractors import router as contractors_router
-from app.routers.stubs import users_router, waste_router, bins_router, lga_router, webhooks_router, ussd_router
+from app.routers.operations import users_router, waste_router, bins_router, pickups_router
+from app.core.core import settings
+from app.routers.paystack import router as webhooks_router
 
-app = FastAPI(title="WastePay Nigeria API", description="Waste Management Payment System", version="2.0.0")
+app = FastAPI(title="WastePay Nigeria API", description="Waste Management Payment System", version="2.1.0")
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=[v.strip() for v in settings.CORS_ORIGINS.split(",") if v.strip()], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(auth_router,        prefix="/auth",        tags=["Auth"])
 app.include_router(wallet_router,      prefix="/wallet",      tags=["Wallet"])
@@ -19,12 +21,16 @@ app.include_router(contractors_router, prefix="/contractors", tags=["Contractors
 app.include_router(users_router,       prefix="/users",       tags=["Users"])
 app.include_router(waste_router,       prefix="/waste",       tags=["Waste"])
 app.include_router(bins_router,        prefix="/bins",        tags=["Bins"])
-app.include_router(lga_router,         prefix="/lga",         tags=["LGA"])
-app.include_router(webhooks_router,    prefix="/webhooks",    tags=["Webhooks"])
-app.include_router(ussd_router,        prefix="/ussd",        tags=["USSD"])
+app.include_router(pickups_router, prefix="/pickups", tags=["Pickups"])
+
+from app.routers.paystack import webhook
+app.add_api_route("/webhooks/paystack", webhook, methods=["POST"], tags=["Webhooks"])
+
+from app.routers.government import router as government_router
+app.include_router(government_router, prefix="/government", tags=["Government"])
 
 @app.get("/", tags=["Health"])
-def root(): return {"status":"ok","service":"WastePay Nigeria API","version":"2.0.0"}
+def root(): return {"status":"ok","service":"WastePay Nigeria API","version":"2.1.0"}
 
 @app.get("/health", tags=["Health"])
 def health(): return {"status":"healthy"}

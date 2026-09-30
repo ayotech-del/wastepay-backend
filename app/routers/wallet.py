@@ -90,139 +90,12 @@ def get_balance(current_user: User = Depends(get_current_user), db: Session = De
 
 
 @router.post("/redeem")
-def redeem_credits(
-    data: RedeemRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Redeem Eco Credits to pay a utility bill via Paystack."""
-    wallet = db.query(Wallet).filter(Wallet.user_id == current_user.id).first()
-    check_credits(wallet, data.amount)
-
-    ref = f"WP-REDEEM-{uuid.uuid4().hex[:12].upper()}"
-
-    # Deduct credits optimistically
-    wallet.eco_credits -= data.amount
-    wallet.total_redeemed += data.amount
-
-    txn = Transaction(
-        id=str(uuid.uuid4()),
-        user_id=current_user.id,
-        type=TransactionType.CREDIT_REDEEMED,
-        amount=data.amount,
-        reference=ref,
-        description=data.description or f"Bill payment — {data.biller_code} ({data.customer_ref})",
-        status="pending",
-        meta={"biller_code": data.biller_code, "customer_ref": data.customer_ref},
-    )
-    db.add(txn)
-    db.commit()
-
-    # Fire Paystack charge to pay biller
-    try:
-        resp = httpx.post(
-            f"{settings.PAYSTACK_BASE_URL}/charge",
-            headers=PAYSTACK_HEADERS,
-            json={
-                "email": current_user.email or f"{current_user.phone}@wastepay.ng",
-                "amount": int(data.amount * 100),  # kobo
-                "reference": ref,
-                "metadata": {
-                    "biller_code": data.biller_code,
-                    "customer_ref": data.customer_ref,
-                    "user_id": current_user.id,
-                    "wastepay_type": "eco_credit_redemption",
-                }
-            },
-            timeout=30
-        )
-        if resp.status_code == 200:
-            txn.status = "processing"
-            txn.paystack_ref = ref
-            db.commit()
-    except Exception:
-        # Paystack call failed — refund credits
-        wallet.eco_credits += data.amount
-        wallet.total_redeemed -= data.amount
-        txn.status = "failed"
-        db.commit()
-        raise HTTPException(502, "Payment gateway error. Credits have been refunded.")
-
-    return {"status": "processing", "reference": ref, "amount": data.amount, "message": "Bill payment initiated. Credits deducted pending confirmation."}
-
+def redeem_credits(data: RedeemRequest, current_user=Depends(get_current_user)):
+    raise HTTPException(503,"Utility redemption provider is not configured. No credits deducted.")
 
 @router.post("/withdraw")
-def withdraw_to_bank(
-    data: WithdrawRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Withdraw Eco Credits to bank account. Requires Tier 3 KYC."""
-    if current_user.kyc_tier != KYCTier.TIER_3:
-        raise HTTPException(403, "Bank withdrawals require Tier 3 KYC. Please complete BVN + selfie verification.")
-
-    wallet = db.query(Wallet).filter(Wallet.user_id == current_user.id).first()
-    check_credits(wallet, data.amount)
-
-    ref = f"WP-WITHDRAW-{uuid.uuid4().hex[:12].upper()}"
-    wallet.eco_credits -= data.amount
-    wallet.total_redeemed += data.amount
-
-    txn = Transaction(
-        id=str(uuid.uuid4()),
-        user_id=current_user.id,
-        type=TransactionType.BANK_WITHDRAWAL,
-        amount=data.amount,
-        reference=ref,
-        description=f"Bank withdrawal to account ending {data.account_number[-4:]}",
-        status="pending",
-        meta={"bank_code": data.bank_code, "account_number": data.account_number[-4:]},
-    )
-    db.add(txn)
-    db.commit()
-
-    # Paystack transfer
-    try:
-        # First create transfer recipient
-        recipient_resp = httpx.post(
-            f"{settings.PAYSTACK_BASE_URL}/transferrecipient",
-            headers=PAYSTACK_HEADERS,
-            json={
-                "type": "nuban",
-                "name": current_user.full_name,
-                "account_number": data.account_number,
-                "bank_code": data.bank_code,
-                "currency": "NGN",
-            },
-            timeout=30
-        )
-        recipient_code = recipient_resp.json().get("data", {}).get("recipient_code")
-
-        if recipient_code:
-            httpx.post(
-                f"{settings.PAYSTACK_BASE_URL}/transfer",
-                headers=PAYSTACK_HEADERS,
-                json={
-                    "source": "balance",
-                    "amount": int(data.amount * 100),
-                    "recipient": recipient_code,
-                    "reference": ref,
-                    "reason": f"WastePay Eco Credit withdrawal — {current_user.full_name}",
-                },
-                timeout=30
-            )
-            txn.status = "processing"
-            db.commit()
-
-    except Exception:
-        wallet.eco_credits += data.amount
-        wallet.total_redeemed -= data.amount
-        txn.status = "failed"
-        db.commit()
-        raise HTTPException(502, "Transfer failed. Credits refunded.")
-
-    return {"status": "processing", "reference": ref, "amount": data.amount}
-
+def withdraw_to_bank(data: WithdrawRequest, current_user=Depends(get_current_user)):
+    raise HTTPException(503,"Bank disbursement is not configured. No credits deducted.")
 
 @router.get("/transactions", response_model=List[TransactionOut])
 def get_transactions(
@@ -231,6 +104,7 @@ def get_transactions(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    if skip < 0 or not 1 <= limit <= 200: raise HTTPException(422,"Invalid pagination")
     txns = (
         db.query(Transaction)
         .filter(Transaction.user_id == current_user.id)

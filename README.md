@@ -1,107 +1,50 @@
-# WastePay Nigeria — FastAPI Backend
+# WastePay
 
-Waste Management Payment System API  
-Stack: FastAPI · PostgreSQL · Paystack · Africa's Talking USSD · Firebase FCM
+FastAPI backend and Flutter app for waste deposits, billing, government operations and contractor collection.
 
----
+The backend lives at the repository root. The updated Flutter project, including its web platform, lives in `wastepay_flutter/`. The older `wastepay_backend/` directory is a legacy copy; use the root backend for this update.
 
-## Project Structure
+## Local setup on Windows
 
-```
-wastepay_backend/
-├── app/
-│   ├── main.py                  # FastAPI app entry point
-│   ├── core/
-│   │   └── core.py              # Config, DB, security (JWT, bcrypt)
-│   ├── models/
-│   │   └── models.py            # SQLAlchemy ORM models
-│   └── routers/
-│       ├── auth.py              # POST /auth/register, /login, /refresh
-│       ├── wallet.py            # GET /wallet/balance, POST /redeem, /withdraw
-│       ├── all_routers.py       # Waste deposit logic, IoT telemetry, USSD handler
-│       └── stubs.py             # Stub routers: users, waste, bins, lga, webhooks, ussd
-├── requirements.txt
-└── .env.example
+```powershell
+py -3.12 -m venv .venv
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
+./.venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8300
 ```
 
----
+In a second terminal:
 
-## Setup
-
-```bash
-# 1. Clone & install
-pip install -r requirements.txt
-
-# 2. Configure environment
-cp .env.example .env
-# Edit .env with your Paystack, Prembly, Africa's Talking keys
-
-# 3. Run database migrations (Alembic)
-alembic upgrade head
-
-# 4. Start server
-uvicorn app.main:app --reload --port 8000
+```powershell
+Set-Location wastepay_flutter
+flutter pub get
+flutter run -d web-server --web-hostname localhost --web-port 3000 --dart-define=API_BASE_URL=http://localhost:8300
 ```
 
-## Docs: http://localhost:8000/docs
+Open http://localhost:3000. API documentation is at http://localhost:8300/docs. The backend allows localhost:3000 by default; configure CORS_ORIGINS when changing the frontend origin.
 
----
+Register an account in the app. No default administrator credentials are supplied. See [LOCAL_TESTING.md](LOCAL_TESTING.md) for staff provisioning, LGA creation, contractor registration and saving/looking up bins.
 
-## Key Endpoints
+## Updated behavior
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | /auth/register | Register citizen (Tier 1 KYC) |
-| POST | /auth/login | Login → JWT tokens |
-| GET | /wallet/balance | Eco Credit balance |
-| POST | /wallet/redeem | Pay utility bill with credits |
-| POST | /wallet/withdraw | Withdraw credits to bank (Tier 3) |
-| GET | /wallet/transactions | Transaction history |
-| POST | /waste/deposit | Submit recyclable deposit → earn credits |
-| GET | /waste/rates | Current NGN/kg credit rates |
-| GET | /bins/nearby?lat=&lng= | Smart bins near location |
-| POST | /bins/telemetry | IoT bin telemetry (MQTT → API) |
-| GET | /lga/dashboard | LGA waste analytics portal |
-| POST | /webhooks/paystack | Paystack event webhook |
-| POST | /ussd/callback | Africa's Talking *932# USSD callback |
+- Profile menus open the government dashboard, contractor registration and assigned routes.
+- Government accounts see their permitted LGAs. Platform administrators can create LGAs.
+- Government staff can register a driver/truck and persist physical bins with a unique printed code, address and coordinates.
+- Bin lookup accepts either a printed code or database ID. QR scanning resolves the saved bin and fills deposit details.
+- Deposits remain pending until trusted sensor readings are verified. Scanning alone does not award credits.
+- Signed Paystack settlement, invoice ownership checks, LGA boundaries and duplicate credit protection are enforced by the backend.
 
----
+Contractor registration requires an existing driver account and government privileges. This is driver/truck registration, not a corporate company registry. QR sticker generation/printing is not included. Route dispatch currently uses the API. The nearby bin list currently searches the default Lagos area; exact lookup works anywhere.
 
-## Credit Rates (NGN per kg)
+## Validation
 
-| Waste Type | Rate |
-|------------|------|
-| Electronics | ₦1,200/kg |
-| Metal | ₦600/kg |
-| Plastic | ₦400/kg |
-| Paper | ₦300/kg |
-| Glass | ₦150/kg |
-| Organic | ₦80/kg |
-| Mixed | ₦100/kg |
-
----
-
-## KYC Tiers
-
-| Tier | Requirement | Daily Limit |
-|------|------------|-------------|
-| Tier 1 | Phone + name | ₦20,000 |
-| Tier 2 | NIN (Prembly) | ₦200,000 |
-| Tier 3 | BVN + selfie | ₦5,000,000 |
-
----
-
-## Deployment (Railway)
-
-```bash
-# Same Railway setup as CredionPay
-railway login
-railway link
-railway up
+```powershell
+./.venv/Scripts/python.exe -m pytest -q tests
+Set-Location wastepay_flutter
+flutter analyze
+flutter test
+flutter build web --dart-define=API_BASE_URL=http://localhost:8300
 ```
 
-Set all env vars in Railway dashboard. PostgreSQL via Railway plugin.
+Verified on September 30, 2026: 21 backend tests and 6 Flutter widget tests passed; Flutter analysis reported no issues; the standard JavaScript web build succeeded. Dependencies currently report WebAssembly incompatibilities, so this verification does not cover a Wasm build. API tests use isolated SQLite databases and mocked provider responses.
 
----
-
-Built on the same FastAPI stack as CredionPay (AyoTech Ltd).
+See [UPDATE_GUIDE.md](UPDATE_GUIDE.md) for backend migration and integration limits, and [DEPLOY.md](DEPLOY.md) for deployment configuration. Flutter includes the web platform; mobile platform generation and device testing remain separate steps.

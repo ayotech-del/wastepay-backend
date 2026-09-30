@@ -11,7 +11,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, validator
 from typing import Optional
-import uuid
+import uuid, re
 
 from app.core.core import (
     get_db, hash_password, verify_password,
@@ -33,15 +33,15 @@ class RegisterRequest(BaseModel):
 
     @validator("phone")
     def validate_phone(cls, v):
-        v = v.strip().replace(" ", "")
-        if not v.startswith("+234") and not v.startswith("0"):
-            raise ValueError("Phone must be a valid Nigerian number")
+        v = re.sub(r"[\s()-]", "", v)
+        if re.fullmatch(r"0[789]\d{9}", v): v = "+234" + v[1:]
+        if not re.fullmatch(r"\+234[789]\d{9}", v): raise ValueError("Valid Nigerian mobile number required")
         return v
 
     @validator("password")
     def validate_password(cls, v):
-        if len(v) < 8:
-            raise ValueError("Password must be at least 8 characters")
+        if len(v) < 8 or len(v.encode()) > 72:
+            raise ValueError("Password must be 8 or more characters and at most 72 UTF-8 bytes")
         return v
 
 
@@ -87,7 +87,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 @router.post("/register", response_model=TokenResponse, status_code=201)
 def register(data: RegisterRequest, db: Session = Depends(get_db)):
     # Check phone duplicate
-    if db.query(User).filter(User.phone == data.phone).first():
+    if db.query(User).filter(User.phone.in_([data.phone, "0"+data.phone[4:]])).first():
         raise HTTPException(400, "Phone number already registered")
     if data.email and db.query(User).filter(User.email == data.email).first():
         raise HTTPException(400, "Email already registered")
@@ -120,7 +120,9 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.phone == form.username).first()
+    try: phone = RegisterRequest.validate_phone(form.username)
+    except ValueError: raise HTTPException(401,"Incorrect phone or password")
+    user = db.query(User).filter(User.phone.in_([phone, "0"+phone[4:]])).first()
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(401, "Incorrect phone or password")
     if not user.is_active:

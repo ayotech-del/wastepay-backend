@@ -11,6 +11,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core.database import Base, engine, SessionLocal
+from app.main import app
 import app.models.models as M
 import uuid
 
@@ -114,33 +115,14 @@ def seed_smart_bins(db):
     db.commit()
 
 def create_admin_user(db):
-    print("\n👤 Creating admin user...")
-    from app.core.core import hash_password
-    existing = db.query(M.User).filter(M.User.phone == "+2349000000001").first()
-    if not existing:
-        uid = str(uuid.uuid4())
-        u = M.User(
-            id=uid,
-            phone="+2349000000001",
-            full_name="WastePay Admin",
-            email="admin@wastepay.ng",
-            hashed_password=hash_password(os.getenv("ADMIN_PASSWORD", "ChangeMe_Prod_2026!")),
-            kyc_tier=M.KYCTier.TIER_3,
-            is_active=True,
-        )
-        db.add(u)
-        db.flush()
-        db.add(M.Wallet(id=str(uuid.uuid4()), user_id=uid))
-        db.commit()
-        print(f"   ✅ Admin user: +2349000000001 | email: admin@wastepay.ng")
-        print(f"   ⚠️  Set ADMIN_PASSWORD env var before production deploy!")
-    else:
-        print("   ⏭  Admin user already exists")
+    # Register through /auth/register, then use scripts/manage_staff.py.
+    # No administrator or reusable password is seeded automatically.
+    print("Register your own account, then provision access using manage_staff.py")
 
 if __name__ == "__main__":
     print("🚀 WastePay Nigeria — Railway Production Setup")
     print("=" * 50)
-    print(f"   DB: {os.getenv('DATABASE_URL', 'SQLite (dev)')}")
+    print("Database connection configured; credentials are not printed")
     print("=" * 50)
 
     create_tables()
